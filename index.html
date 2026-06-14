@@ -4654,6 +4654,7 @@
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_heartbeat`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_order`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_visible_monsters`);
+                mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_monsters`);
                 
                 // Sincroniza todos os selecionados
                 selectedCharIndices.forEach(idx => syncPlayerData(idx));
@@ -4662,6 +4663,7 @@
                 if (iamTheMestre) {
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_order`, JSON.stringify(mestreOrder), { retain: true });
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_visible_monsters`, JSON.stringify(visibleMonsters), { retain: true });
+                    mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
                 }
                 
                 isSelectingForMesa = false;
@@ -4700,6 +4702,13 @@
                     } else if (lastPart === '_visible_monsters') {
                         visibleMonsters = data;
                         renderMestrePanel();
+                    } else if (lastPart === '_mestre_monsters') {
+                        mestreMonsters = data;
+                        if (!iamTheMestre) {
+                            localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
+                        }
+                        renderMestrePanel();
+                        if (document.getElementById('mestre-bestiary-view').style.display === 'block') renderBestiary();
                     } else if (lastPart === '_mestre_heartbeat') {
                         if (data.id === mestreId) {
                             lastMestreHeartbeat = Date.now();
@@ -4979,6 +4988,7 @@
                             <div class="${isMonster ? 'monster-name' : ''}" style="font-weight:bold; color:${isDead ? '#94a3b8' : (isMonster ? '#ef4444' : hpColor)}; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                                 ${p.name} <small style="color:#64748b; font-weight:normal;">${isMonster ? 'CR' : 'Nív'} ${p.level || 1} ${p.class || ''}</small>
                             </div>
+                            ${isMonster && p.description ? `<div style="font-size:11px; color:#94a3b8; font-style:italic; margin-top:2px;">${p.description}</div>` : ''}
                             ${showStats ? `
                             <div style="display:flex; justify-content:space-between; margin-top:3px; font-size:11px;">
                                 <span>HP: ${p.hp}/${p.hpMax}${tempHPText}</span>
@@ -4992,7 +5002,9 @@
                                 ${p.tempHP > 0 ? `<div style="position:absolute; top:0; left:0; width:${Math.min(100, (p.tempHP / p.hpMax) * 100)}%; height:100%; background:rgba(88, 166, 255, 0.5); border-right:1px solid #58a6ff;"></div>` : ''}
                             </div>
                             ` : `
-                            <div style="font-size:11px; color:#64748b; margin-top:5px; font-style:italic;">Status ocultos pelo mestre</div>
+                            <div style="display:flex; align-items:center; gap:5px; margin-top:4px;">
+                                ${p.condition && p.condition !== 'Nenhuma' ? `<span class="condition-badge" style="background:${isDead ? '#475569' : hpColor}; font-size:10px; padding:1px 4px;">${p.condition}</span>` : ''}
+                            </div>
                             `}
                         </div>
                     </div>
@@ -5144,6 +5156,8 @@
             // Notificar todos sobre a mudança de visibilidade dos monstros
             if (mqttClient && mqttClient.connected) {
                 mqttClient.publish(`dnd/mesa/${mesaCodigo}/_visible_monsters`, JSON.stringify(visibleMonsters), { retain: true });
+                // Também sincronizar os dados dos monstros para garantir que todos tenham as infos
+                mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
             }
             
             renderBestiary();
@@ -5444,6 +5458,7 @@
             document.getElementById('monster-class').value = '';
             document.getElementById('monster-hp-max').value = '';
             document.getElementById('monster-ac').value = '';
+            document.getElementById('monster-desc').value = '';
             // Reset foto
             const prevImg = document.getElementById('monster-photo-preview');
             const prevPlaceholder = document.getElementById('monster-photo-placeholder');
@@ -5480,6 +5495,7 @@
                 hpMax: hpVal,
                 hp: hpVal,
                 ac: parseInt(document.getElementById('monster-ac').value) || 10,
+                description: document.getElementById('monster-desc').value.trim() || '',
                 photo: photoData,
                 tempHP: 0,
                 condition: 'Nenhuma',
@@ -5487,6 +5503,11 @@
             };
             mestreMonsters.push(monster);
             localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
+            
+            // Sincronizar dados dos monstros se for o mestre
+            if (iamTheMestre && mqttClient && mqttClient.connected) {
+                mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
+            }
             document.getElementById('monster-modal').style.display = 'none';
             renderBestiary();
             playSFX('success');
@@ -5622,6 +5643,9 @@
             }
             if (input) input.value = '';
             localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
+            if (iamTheMestre && mqttClient && mqttClient.connected) {
+                mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
+            }
             renderBestiary();
             renderMestrePanel();
         }
@@ -5638,6 +5662,7 @@
                 localStorage.setItem('visibleMonsters', JSON.stringify(visibleMonsters));
                 if (mqttClient && mqttClient.connected) {
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_visible_monsters`, JSON.stringify(visibleMonsters), { retain: true });
+                    mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
                 }
             }
             
@@ -5874,6 +5899,10 @@
                             <input type="number" id="monster-ac" placeholder="Ex: 13" min="0">
                         </div>
                     </div>
+                </div>
+                <div class="form-group" style="margin-top:10px;">
+                    <label>Descrição para Jogadores</label>
+                    <textarea id="monster-desc" placeholder="Ex: Um goblin sorrateiro com uma adaga enferrujada..." rows="2" style="resize:none;"></textarea>
                 </div>
             </div>
             <div style="display:flex; gap:10px; margin-top:5px;">
