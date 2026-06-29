@@ -1549,7 +1549,7 @@
                     <button onclick="exportAllCharacters()">Exportar Backup</button>
                     <button onclick="document.getElementById('importFile').click()">Importar Backup</button>
                     <input type="file" id="importFile" style="display:none" onchange="importAllCharacters(event)">
-                    <button id="save-btn" onclick="saveAll(true)" style="border-color:#4dff88; color:#4dff88; width:80px; padding:8px 0;">SAVE</button>
+                    <button id="save-btn" onclick="manualSave()" style="border-color:#4dff88; color:#4dff88; font-weight: bold; padding: 8px 15px;">SAVE</button>
                 </div>
         </div>
 
@@ -1573,7 +1573,7 @@
             <div class="character-controls-right">
                 <button onclick="toggleMestre()" style="border-color:#bc8cf2; color:#bc8cf2;">👁️ Painel Mestre</button>
                 <button onclick="syncPlayerData()" style="border-color:#58a6ff; color:#58a6ff;">🔄 Sincronizar</button>
-                <button onclick="saveAll(true)" style="border-color:#4dff88; color:#4dff88; font-weight: bold;">💾 SAVE</button>
+                <button onclick="exportCurrentCharacter()">💾 Salvar JSON</button>
             </div>
         </div>
 
@@ -1642,7 +1642,7 @@
                             </div>
                             <div class="ficha-combat-item">
                                 <label class="ficha-combat-label">🎓 Prof.</label>
-                                <input type="number" id="charProf" class="ficha-combat-input" value="2">
+                                <input type="number" id="charProf" class="ficha-combat-input" value="2" readonly style="background-color: rgba(0,0,0,0.2); cursor: not-allowed;">
                             </div>
                             <div class="ficha-combat-item">
                                 <label class="ficha-combat-label">✨ Insp.</label>
@@ -3212,6 +3212,22 @@
                     if (['charLevel', 'charAC', 'charSpeed', 'charProf', 'charInspiration'].includes(id)) val = parseInt(val) || 0;
                     allCharacters[currentCharacterIndex][prop] = val;
                     if (id === 'charProf') renderSkills(); // Atualiza perícias se o bônus de proficiência mudar
+                    
+                    // Lógica de Bônus de Proficiência Automático baseado no Nível
+                    if (id === 'charLevel') {
+                        const level = parseInt(val) || 1;
+                        let profBonus = 2;
+                        if (level >= 17) profBonus = 6;
+                        else if (level >= 13) profBonus = 5;
+                        else if (level >= 9) profBonus = 4;
+                        else if (level >= 5) profBonus = 3;
+                        
+                        const profInput = document.getElementById('charProf');
+                        profInput.value = profBonus;
+                        allCharacters[currentCharacterIndex].proficiencyBonus = profBonus;
+                        renderSkills(); // Atualiza as perícias com o novo bônus
+                    }
+
                     saveAll();
                 });
             });
@@ -3324,7 +3340,7 @@
             loadCharacterData(char);
         }
 
-        function closeCharacter() { saveAll();
+        function closeCharacter() {
             currentCharacterIndex = -1;
             wbInitialized = false; // Resetar flag para próximo personagem
             wbLastCharIdx = -1;
@@ -4154,23 +4170,30 @@
         }
 
         // ===== PERSISTÊNCIA =====
-        function saveAll(showFeedback = false) { 
-            localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); 
-            if (showFeedback) {
-                const btn = document.getElementById('save-btn');
-                if (btn) {
-                    const originalText = btn.innerText;
-                    btn.innerText = 'SALVO! ✅';
-                    btn.style.borderColor = '#4dff88';
-                    setTimeout(() => { btn.innerText = originalText; }, 2000);
-                }
-                // Também dar feedback no botão de salvar do personagem se estiver aberto
-                const saveJsonBtn = document.querySelector('button[onclick="exportCurrentCharacter()"]');
-                if (saveJsonBtn) {
-                    const originalText = saveJsonBtn.innerText;
-                    saveJsonBtn.innerText = 'DADOS SALVOS! ✅';
-                    setTimeout(() => { saveJsonBtn.innerText = originalText; }, 2000);
-                }
+        function saveAll() { localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); }
+
+        function manualSave() {
+            try {
+                localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
+                const saveBtn = document.getElementById('save-btn');
+                const originalText = saveBtn.innerText;
+                const originalColor = saveBtn.style.borderColor;
+                
+                saveBtn.innerText = "SAVED!";
+                saveBtn.style.borderColor = "#4dff88";
+                saveBtn.style.backgroundColor = "rgba(77, 255, 136, 0.2)";
+                
+                playSFX('success');
+                
+                setTimeout(() => {
+                    saveBtn.innerText = originalText;
+                    saveBtn.style.backgroundColor = "transparent";
+                }, 2000);
+                
+                console.log("Personagens salvos com sucesso no LocalStorage.");
+            } catch (e) {
+                console.error("Erro ao salvar no LocalStorage:", e);
+                alert("Erro ao salvar! O LocalStorage pode estar cheio.");
             }
         }
 
