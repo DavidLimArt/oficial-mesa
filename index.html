@@ -4922,14 +4922,14 @@
                 ac: char.armorClass || 0,
                 class: char.class || '',
                 level: char.level || 1,
-                // Foto: envia apenas se for URL externa (não Base64) para evitar sobrecarga
-                photo: (char.photo && !char.photo.startsWith('data:image')) ? char.photo : '',
+                // Foto: permite Base64 agora que as imagens são comprimidas e leves
+                photo: char.photo || '',
                 items: (char.items || []).map(item => ({
                     id: item.id,
                     name: item.name,
                     description: item.description,
-                    // Foto de item: nunca envia Base64 via MQTT
-                    photo: (item.photo && !item.photo.startsWith('data:image')) ? item.photo : '',
+                    // Foto de item: permite Base64 comprimido
+                    photo: item.photo || '',
                     color: item.color || '',
                     isMasterItem: item.isMasterItem || false
                 })),
@@ -5116,11 +5116,22 @@
                                 saveAll();
                                 // Atualiza a UI se este personagem estiver aberto
                                 if (currentCharacterIndex === localIdx) {
-                                    const el = document.getElementById(data.field);
+                                    // Mapear campos de dados para IDs de elementos da ficha
+                                    const fieldToId = {
+                                        'hitPoints': 'charHP',
+                                        'tempHP': 'charTempHP',
+                                        'maxHitPoints': 'charMaxHP'
+                                    };
+                                    const elId = fieldToId[data.field] || data.field;
+                                    const el = document.getElementById(elId);
                                     if (el && el !== document.activeElement) el.value = data.value;
+                                    
                                     if (['hitPoints', 'maxHitPoints', 'tempHP'].includes(data.field)) updateHPDisplay();
                                 }
-                                if (isMestre) renderMestrePanel();
+                                if (isMestre) {
+                                    // Se o mestre estiver com um input focado, a renderização inteligente cuidará de não destruir o foco
+                                    renderMestrePanel();
+                                }
                             }
                         }
                     } else if (lastPart === 'rolls') {
@@ -5216,8 +5227,10 @@
                 return;
             }
 
+            const amount = (typeof cmd.amount === 'object') ? cmd.amount.total : cmd.amount;
+
             if (cmd.type === 'damage') {
-                let damage = cmd.amount;
+                let damage = amount;
                 if (char.tempHP > 0) {
                     if (damage <= char.tempHP) {
                         char.tempHP -= damage;
@@ -5229,19 +5242,20 @@
                 }
                 char.hitPoints = Math.max(0, char.hitPoints - damage);
             } else if (cmd.type === 'heal') {
-                char.hitPoints = Math.min(char.maxHitPoints, char.hitPoints + cmd.amount);
+                char.hitPoints = Math.min(char.maxHitPoints, char.hitPoints + amount);
             } else if (cmd.type === 'temp') {
-                char.tempHP = cmd.amount;
+                char.tempHP = amount;
             }
             
             saveAll();
             if (currentCharacterIndex === idx) {
                 updateHPDisplay();
-                // Atualizar campos de input se a ficha estiver aberta
-                document.getElementById('charHP').value = char.hitPoints;
-                document.getElementById('charTempHP').value = char.tempHP;
             }
-            console.log(`Comando remoto recebido: ${cmd.type} de ${cmd.amount}`);
+            
+            // Republicar o novo estado para a mesa imediatamente após o comando do mestre
+            publishFullSnapshot(idx);
+            
+            console.log(`Comando remoto recebido: ${cmd.type} de ${amount}`);
         }
 
         function toggleMestre() {
@@ -5260,6 +5274,7 @@
 
         function renderMestrePanel() {
             const list = document.getElementById('mestre-list');
+            const agora = Date.now();
             
             // Mostrar/Esconder Hub de Rolagem do Mestre no Rodapé
             const mestreFooterRoll = document.getElementById('mestre-footer-roll');
@@ -5267,35 +5282,19 @@
                 mestreFooterRoll.style.display = iamTheMestre ? 'block' : 'none';
             }
 
-            // Salvar valores atuais dos inputs para não perder durante a digitação
-            const currentInputs = {};
-            list.querySelectorAll('input').forEach(input => {
-                currentInputs[input.id] = input.value;
-            });
-
-            list.innerHTML = '';
-            
-            const agora = Date.now();
-            
-            // Preparar lista de entidades (jogadores e monstros visíveis)
+            // Mapear entidades atuais para renderização
             let entities = [];
-            
-            // Adicionar jogadores online
             Object.values(jogadoresOnline).forEach(p => {
                 if (agora - (p.lastUpdate || 0) > 600000) return;
                 if (!iamTheMestre && p.hidden) return;
                 entities.push({ type: 'player', data: p, id: p.id });
             });
-            
-            // Adicionar monstros visíveis
             visibleMonsters.forEach(mId => {
                 const m = mestreMonsters.find(x => x.id === mId);
-                if (m) {
-                    entities.push({ type: 'monster', data: m, id: 'monster:' + m.id });
-                }
+                if (m) entities.push({ type: 'monster', data: m, id: 'monster:' + m.id });
             });
 
-            // Ordenar entidades
+            // Ordenação
             if (mestreOrder && mestreOrder.length > 0) {
                 entities.sort((a, b) => {
                     const idxA = mestreOrder.indexOf(a.id);
@@ -5306,114 +5305,147 @@
                     return idxA - idxB;
                 });
             }
-            
-            // Regra: Monstros sempre no topo (sobrescreve ordem se necessário)
             entities.sort((a, b) => {
                 if (a.type === 'monster' && b.type !== 'monster') return -1;
                 if (a.type !== 'monster' && b.type === 'monster') return 1;
                 return 0;
             });
 
-            entities.forEach(entity => {
+            // --- RENDERIZAÇÃO INTELIGENTE (Preservar foco e evitar flickering) ---
+            const existingCards = {};
+            Array.from(list.children).forEach(child => {
+                if (child.getAttribute('data-player-id')) {
+                    existingCards[child.getAttribute('data-player-id')] = child;
+                }
+            });
+
+            const currentIds = entities.map(e => e.id);
+            // Remover cards de quem saiu
+            Object.keys(existingCards).forEach(id => {
+                if (!currentIds.includes(id)) {
+                    list.removeChild(existingCards[id]);
+                }
+            });
+
+            entities.forEach((entity, index) => {
                 const isMonster = entity.type === 'monster';
                 const p = entity.data;
                 const id = entity.id;
-                
-                const card = document.createElement('div');
-                card.className = 'mestre-card' + (isMonster ? ' is-monster' : '');
-                card.setAttribute('data-player-id', id);
-                if (!isMonster && p.hidden) card.style.opacity = '0.6';
-                
-                // Drag and drop apenas se for o mestre
-                if (iamTheMestre) {
-                    card.setAttribute('draggable', 'true');
-                    card.addEventListener('dragstart', handleDragStart);
-                    card.addEventListener('dragend', (e) => {
-                        handleDragEnd(e);
-                        saveNewOrder();
-                    });
-                    card.style.cursor = 'grab';
-                }
-
                 const isExpanded = isMonster ? expandedMonsters.has(p.id) : expandedPlayers.has(p.id);
                 const isDead = p.hp <= 0;
                 const hpPercent = (p.hp / p.hpMax) * 100;
                 let hpColor = hpPercent > 50 ? '#4dff88' : (hpPercent > 20 ? '#ffd700' : '#ff4d4d');
-                
                 if (p.condition && p.conditionColor) hpColor = p.conditionColor;
-                if (isDead) {
-                    card.style.filter = 'grayscale(100%)';
-                    card.style.opacity = '0.8';
-                    card.style.background = 'rgba(0,0,0,0.4)';
-                }
-
                 const tempHPText = p.tempHP > 0 ? `<span style="color:#58a6ff"> (+${p.tempHP})</span>` : '';
-                
-                // Para jogadores: HP e AC normais. Para monstros: Ocultar se não for o mestre.
                 const showStats = !isMonster || iamTheMestre;
-                
                 const svgMonster = `data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23334155%22/><text x=%2250%25%22 y=%2250%25%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2240%22>👹</text></svg>`;
 
-                card.innerHTML = `
-                    <div class="mestre-card-main" onclick="${iamTheMestre ? (isMonster ? `toggleExpandMonster('${p.id}')` : `toggleExpandPlayer('${p.id}')`) : ''}">
-                        <div class="mestre-card-photo-container">
-                            <img src="${p.photo || (isMonster ? svgMonster : '')}" class="mestre-card-photo" style="border-color:${isDead ? '#64748b' : (isMonster ? '#ef4444' : hpColor)}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23334155%22/><text x=%2250%%22 y=%2250%%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2240%22>?</text></svg>'">
-                            ${iamTheMestre && !isMonster ? `<div class="visibility-toggle" onclick="event.stopPropagation(); togglePlayerVisibility('${p.id}')">${p.hidden ? '👁️‍🗨️' : '👁️'}</div>` : ''}
-                            ${isDead ? '<div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:24px; text-shadow: 0 0 10px black; z-index:5;">💀</div>' : ''}
-                        </div>
-                        <div style="flex:1">
-                            <div class="${isMonster ? 'monster-name' : ''}" style="font-weight:bold; color:${isDead ? '#94a3b8' : (isMonster ? '#ef4444' : hpColor)}; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-                                ${p.name} <small style="color:#64748b; font-weight:normal;">${isMonster ? 'CR' : 'Nív'} ${p.level || 1} ${p.class || ''}</small>
-                            </div>
-                            ${isMonster && p.description ? `<div style="font-size:11px; color:#94a3b8; font-style:italic; margin-top:2px;">${p.description}</div>` : ''}
-                            ${showStats ? `
-                            <div style="display:flex; justify-content:space-between; margin-top:3px; font-size:11px;">
-                                <span>HP: ${p.hp}/${p.hpMax}${tempHPText}</span>
-                                <div style="display:flex; align-items:center; gap:5px;">
-                                    ${p.condition && p.condition !== 'Nenhuma' ? `<span class="condition-badge" style="background:${isDead ? '#475569' : hpColor}">${p.condition}</span>` : ''}
-                                    <span>🛡️ ${p.ac}</span>
-                                </div>
-                            </div>
-                            <div style="width:100%; height:5px; background:#334155; border-radius:3px; margin-top:4px; overflow:hidden; position:relative;">
-                                <div style="width:${Math.max(0, Math.min(100, hpPercent))}%; height:100%; background:${isDead ? '#475569' : hpColor}; transition: width 0.3s;"></div>
-                                ${p.tempHP > 0 ? `<div style="position:absolute; top:0; left:0; width:${Math.min(100, (p.tempHP / p.hpMax) * 100)}%; height:100%; background:rgba(88, 166, 255, 0.5); border-right:1px solid #58a6ff;"></div>` : ''}
-                            </div>
-                            ` : `
-                            <div style="display:flex; align-items:center; gap:5px; margin-top:4px;">
-                                ${p.condition && p.condition !== 'Nenhuma' ? `<span class="condition-badge" style="background:${isDead ? '#475569' : hpColor}; font-size:10px; padding:1px 4px;">${p.condition}</span>` : ''}
-                            </div>
-                            `}
-                        </div>
-                    </div>
-                    ${iamTheMestre && isExpanded ? `
-                    <div class="mestre-hp-hub">
-                        <div style="display:flex; gap:5px; align-items:center;">
-                            <button onclick="${isMonster ? `promptMonsterCondition('${p.id}')` : `promptCustomCondition('${p.id}')`}" style="font-size:9px; padding:2px 5px; flex:1;">➕ Condição</button>
-                            <button onclick="${isMonster ? `clearMonsterCondition('${p.id}')` : `setPlayerCondition('${p.id}', 'Nenhuma', '')`}" style="font-size:9px; padding:2px 5px; background:#475569; border-color:#475569;">Limpar</button>
-                        </div>
-                        <div class="mestre-hp-controls">
-                            <input type="text" id="${isMonster ? 'monster-hp-val-' + p.id : 'hp-val-' + p.id}" placeholder="1d6+5" onclick="event.stopPropagation()">
-                            <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'damage')` : `remoteHPAction('${p.id}', 'damage')`}" style="background:#ff4d4d; border-color:#ff4d4d; color:white;">Dano</button>
-                            <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'heal')` : `remoteHPAction('${p.id}', 'heal')`}" style="background:#4dff88; border-color:#4dff88; color:#0f172a;">Cura</button>
-                            <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'temp')` : `remoteHPAction('${p.id}', 'temp')`}" style="background:#58a6ff; border-color:#58a6ff; color:white;">Temp</button>
-                        </div>
-                        ${!isMonster ? `
-                        <div style="border-top:1px solid rgba(255,255,255,0.05); padding-top:8px; margin-top:5px; display:flex; flex-direction:column; gap:6px;">
-                            <button onclick="openMasterItemHub('${p.id}')" style="font-size:10px; padding:4px; width:100%; border-color:var(--accent-color); color:var(--accent-color);">Adicionar Item</button>
-                            <div style="display:flex; gap:5px; align-items:center;">
-                                <input type="text" id="whisper-input-${p.id}" placeholder="Sussurrar algo..." onclick="event.stopPropagation()" style="flex:1; font-size:10px; padding:4px; background:rgba(188,140,242,0.1); border-color:#bc8cf2;">
-                                <button onclick="sendWhisperInline('${p.id}')" style="font-size:10px; padding:4px 8px; background:#bc8cf2; border-color:#bc8cf2; color:#0f172a; white-space:nowrap;">💬 Sussurar</button>
-                            </div>
-                        </div>` : ''}
-                    </div>` : ''}
-                `;
-                list.appendChild(card);
+                let card = existingCards[id];
+                if (!card) {
+                    card = document.createElement('div');
+                    card.setAttribute('data-player-id', id);
+                    list.appendChild(card);
+                }
 
-                // Restaurar valor do input
-                const inputId = isMonster ? `monster-hp-val-${p.id}` : `hp-val-${p.id}`;
-                const input = document.getElementById(inputId);
-                if (input && currentInputs[input.id] !== undefined && document.activeElement === input) {
-                    input.value = currentInputs[input.id];
+                // Só atualiza o HTML se NÃO houver um input focado dentro deste card
+                const hasFocusedInput = card.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+                
+                if (!hasFocusedInput) {
+                    card.className = 'mestre-card' + (isMonster ? ' is-monster' : '');
+                    if (!isMonster && p.hidden) card.style.opacity = '0.6'; else card.style.opacity = '1';
+                    
+                    if (iamTheMestre) {
+                        card.setAttribute('draggable', 'true');
+                        card.style.cursor = 'grab';
+                        // Eventos de drag atribuídos apenas uma vez se possível, mas aqui garantimos consistência
+                        card.ondragstart = handleDragStart;
+                        card.ondragend = (e) => { handleDragEnd(e); saveNewOrder(); };
+                    }
+
+                    if (isDead) {
+                        card.style.filter = 'grayscale(100%)';
+                        card.style.background = 'rgba(0,0,0,0.4)';
+                    } else {
+                        card.style.filter = 'none';
+                        card.style.background = 'rgba(255,255,255,0.03)';
+                    }
+
+                    card.innerHTML = `
+                        <div class="mestre-card-main" onclick="${iamTheMestre ? (isMonster ? `toggleExpandMonster('${p.id}')` : `toggleExpandPlayer('${p.id}')`) : ''}">
+                            <div class="mestre-card-photo-container">
+                                <img src="${p.photo || (isMonster ? svgMonster : '')}" class="mestre-card-photo" style="border-color:${isDead ? '#64748b' : (isMonster ? '#ef4444' : hpColor)}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23334155%22/><text x=%2250%%22 y=%2250%%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2240%22>?</text></svg>'">
+                                ${iamTheMestre && !isMonster ? `<div class="visibility-toggle" onclick="event.stopPropagation(); togglePlayerVisibility('${p.id}')">${p.hidden ? '👁️‍🗨️' : '👁️'}</div>` : ''}
+                                ${isDead ? '<div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:24px; text-shadow: 0 0 10px black; z-index:5;">💀</div>' : ''}
+                            </div>
+                            <div style="flex:1">
+                                <div class="${isMonster ? 'monster-name' : ''}" style="font-weight:bold; color:${isDead ? '#94a3b8' : (isMonster ? '#ef4444' : hpColor)}; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                                    ${p.name} <small style="color:#64748b; font-weight:normal;">${isMonster ? 'CR' : 'Nív'} ${p.level || 1} ${p.class || ''}</small>
+                                </div>
+                                ${isMonster && p.description ? `<div style="font-size:11px; color:#94a3b8; font-style:italic; margin-top:2px;">${p.description}</div>` : ''}
+                                ${showStats ? `
+                                <div style="display:flex; justify-content:space-between; margin-top:3px; font-size:11px;">
+                                    <span>HP: ${p.hp}/${p.hpMax}${tempHPText}</span>
+                                    <div style="display:flex; align-items:center; gap:5px;">
+                                        ${p.condition && p.condition !== 'Nenhuma' ? `<span class="condition-badge" style="background:${isDead ? '#475569' : hpColor}">${p.condition}</span>` : ''}
+                                        <span>🛡️ ${p.ac}</span>
+                                    </div>
+                                </div>
+                                <div style="width:100%; height:5px; background:#334155; border-radius:3px; margin-top:4px; overflow:hidden; position:relative;">
+                                    <div style="width:${Math.max(0, Math.min(100, hpPercent))}%; height:100%; background:${isDead ? '#475569' : hpColor}; transition: width 0.3s;"></div>
+                                    ${p.tempHP > 0 ? `<div style="position:absolute; top:0; left:0; width:${Math.min(100, (p.tempHP / p.hpMax) * 100)}%; height:100%; background:rgba(88, 166, 255, 0.5); border-right:1px solid #58a6ff;"></div>` : ''}
+                                </div>
+                                ` : `
+                                <div style="display:flex; align-items:center; gap:5px; margin-top:4px;">
+                                    ${p.condition && p.condition !== 'Nenhuma' ? `<span class="condition-badge" style="background:${isDead ? '#475569' : hpColor}; font-size:10px; padding:1px 4px;">${p.condition}</span>` : ''}
+                                </div>
+                                `}
+                            </div>
+                        </div>
+                        ${iamTheMestre && isExpanded ? `
+                        <div class="mestre-hp-hub">
+                            <div style="display:flex; gap:5px; align-items:center;">
+                                <button onclick="${isMonster ? `promptMonsterCondition('${p.id}')` : `promptCustomCondition('${p.id}')`}" style="font-size:9px; padding:2px 5px; flex:1;">➕ Condição</button>
+                                <button onclick="${isMonster ? `clearMonsterCondition('${p.id}')` : `setPlayerCondition('${p.id}', 'Nenhuma', '')`}" style="font-size:9px; padding:2px 5px; background:#475569; border-color:#475569;">Limpar</button>
+                            </div>
+                            <div class="mestre-hp-controls">
+                                <input type="text" id="${isMonster ? 'monster-hp-val-' + p.id : 'hp-val-' + p.id}" placeholder="1d6+5" onclick="event.stopPropagation()">
+                                <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'damage')` : `remoteHPAction('${p.id}', 'damage')`}" style="background:#ff4d4d; border-color:#ff4d4d; color:white;">Dano</button>
+                                <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'heal')` : `remoteHPAction('${p.id}', 'heal')`}" style="background:#4dff88; border-color:#4dff88; color:#0f172a;">Cura</button>
+                                <button onclick="${isMonster ? `monsterHPAction('${p.id}', 'temp')` : `remoteHPAction('${p.id}', 'temp')`}" style="background:#58a6ff; border-color:#58a6ff; color:white;">Temp</button>
+                            </div>
+                            ${!isMonster ? `
+                            <div style="border-top:1px solid rgba(255,255,255,0.05); padding-top:8px; margin-top:5px; display:flex; flex-direction:column; gap:6px;">
+                                <button onclick="openMasterItemHub('${p.id}')" style="font-size:10px; padding:4px; width:100%; border-color:var(--accent-color); color:var(--accent-color);">Adicionar Item</button>
+                                <div style="display:flex; gap:5px; align-items:center;">
+                                    <input type="text" id="whisper-input-${p.id}" placeholder="Sussurrar algo..." onclick="event.stopPropagation()" style="flex:1; font-size:10px; padding:4px; background:rgba(188,140,242,0.1); border-color:#bc8cf2;">
+                                    <button onclick="sendWhisperInline('${p.id}')" style="font-size:10px; padding:4px 8px; background:#bc8cf2; border-color:#bc8cf2; color:#0f172a; white-space:nowrap;">💬 Sussurar</button>
+                                </div>
+                            </div>` : ''}
+                        </div>` : ''}
+                    `;
+                } else {
+                    // Se houver foco, atualizamos apenas o necessário sem reconstruir o HTML para não perder o foco/seleção
+                    // Procurar o elemento que contém o texto "HP:"
+                    const spans = card.querySelectorAll('span');
+                    let hpTextEl = null;
+                    for (let s of spans) { if (s.textContent.includes('HP:')) { hpTextEl = s; break; } }
+                    
+                    if (hpTextEl) hpTextEl.innerHTML = `HP: ${p.hp}/${p.hpMax}${tempHPText}`;
+                    
+                    const hpBar = card.querySelector('div[style*="height:5px"] > div');
+                    if (hpBar) hpBar.style.width = `${Math.max(0, Math.min(100, hpPercent))}%`;
+                    
+                    // Atualiza a borda da foto e cor do nome se a condição mudar
+                    const img = card.querySelector('.mestre-card-photo');
+                    if (img) img.style.borderColor = isDead ? '#64748b' : (isMonster ? '#ef4444' : hpColor);
+                    
+                    const nameEl = card.querySelector('div[style*="font-weight:bold"]');
+                    if (nameEl) nameEl.style.color = isDead ? '#94a3b8' : (isMonster ? '#ef4444' : hpColor);
+                }
+
+                // Garantir ordem visual correta no DOM
+                if (list.children[index] !== card) {
+                    list.insertBefore(card, list.children[index]);
                 }
             });
 
@@ -5467,6 +5499,8 @@
                     m.condition = name;
                     m.conditionColor = selectedConditionColor;
                     localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
+                    // Republicar monstros para a mesa
+                    mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
                     renderBestiary();
                 }
             } else {
@@ -5721,13 +5755,7 @@
             const name = document.getElementById('m-item-name').value.trim();
             const desc = document.getElementById('m-item-desc').value.trim();
             const photoImg = document.getElementById('m-item-photo-preview');
-            let photo = photoImg.style.display === 'block' ? photoImg.src : '';
-            // Nunca envia Base64 via MQTT: imagens comprimidas já são menores,
-            // mas se ainda for Base64 (ex: import de backup), limpa para não sobrecarregar
-            if (photo && photo.startsWith('data:image') && photo.length > 30000) {
-                console.warn('[sendMasterItem] Foto muito grande para MQTT, omitindo.');
-                photo = ''; // Omite a foto para evitar sobrecarga no broker
-            }
+            const photo = photoImg.style.display === 'block' ? photoImg.src : '';
             const color = document.getElementById('master-item-modal').dataset.selectedColor;
 
             if (!name) {
@@ -5793,7 +5821,8 @@
             const valStr = input.value.trim();
             if (!valStr) return;
             
-            const amount = parseDice(valStr);
+            const diceResult = parseDice(valStr);
+            const amount = diceResult.total;
             const p = jogadoresOnline[playerId];
             if (!p) return;
 
@@ -6018,7 +6047,11 @@
             m.condition = 'Nenhuma';
             m.conditionColor = '';
             localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
+            if (iamTheMestre && mqttClient && mqttClient.connected) {
+                mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
+            }
             renderBestiary();
+            renderMestrePanel();
         }
 
         function monsterHPAction(id, type) {
@@ -6027,7 +6060,8 @@
             const input = document.getElementById(`monster-hp-val-${id}`);
             const valStr = input ? input.value.trim() : '';
             if (!valStr) return;
-            const val = parseDice(valStr);
+            const diceResult = parseDice(valStr);
+            const val = diceResult.total;
             if (type === 'damage') {
                 let dmg = val;
                 if (m.tempHP > 0) {
