@@ -3255,6 +3255,42 @@
             }
         }
 
+        // ===== COMPRESSÃO DE IMAGENS =====
+        function compressImage(base64Str, maxWidth = 300, maxHeight = 300, quality = 0.7) {
+            return new Promise((resolve) => {
+                if (!base64Str || !base64Str.startsWith('data:image')) {
+                    resolve(base64Str);
+                    return;
+                }
+                const img = new Image();
+                img.src = base64Str;
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+
+                    if (width > height) {
+                        if (width > maxWidth) {
+                            height *= maxWidth / width;
+                            width = maxWidth;
+                        }
+                    } else {
+                        if (height > maxHeight) {
+                            width *= maxHeight / height;
+                            height = maxHeight;
+                        }
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    resolve(canvas.toDataURL('image/jpeg', quality));
+                };
+                img.onerror = () => resolve(base64Str);
+            });
+        }
+
         // ===== SELEÇÃO DE PERSONAGENS =====
         function renderCharacterGrid() {
             const grid = document.getElementById('characterGrid');
@@ -3293,11 +3329,12 @@
             const photoFile = document.getElementById('newCharPhoto').files[0];
             let photoData = '';
             if (photoFile) {
-                photoData = await new Promise(resolve => {
+                const rawData = await new Promise(resolve => {
                     const reader = new FileReader();
                     reader.onload = e => resolve(e.target.result);
                     reader.readAsDataURL(photoFile);
                 });
+                photoData = await compressImage(rawData, 400, 400, 0.6);
             }
 
             const newChar = {
@@ -3679,13 +3716,13 @@
                 container.innerHTML += `
                     <div class="ficha-attr-card-new">
                         <div class="ficha-attr-name-top">${attr.emoji} ${attr.name}</div>
-                        <div class="ficha-attr-row">
+                        <div class="ficha-attr-row" style="justify-content: space-between; padding: 0 5px;">
                             <div class="ficha-skill-dot ${attr.proficiency ? 'ficha-skill-dot-active' : ''}" 
                                  onclick="toggleAttrProficiency('${key}')" 
-                                 style="margin-right: -5px; width: 14px; height: 14px; min-width: 14px; border-width: 1px;"></div>
+                                 style="width: 16px; height: 16px; min-width: 16px; border: 2px solid var(--accent-color); cursor: pointer;"></div>
                             <input type="number" value="${attr.value}" onchange="updateAttr('${key}', this.value)"
-                                class="ficha-attr-value-input-large" style="max-width: 60px;">
-                            <div class="ficha-attr-modifier-small" style="color:${modColor}">${totalMod >= 0 ? '+' : ''}${totalMod}</div>
+                                class="ficha-attr-value-input-large" style="width: 45px; flex: none; font-size: 20px;">
+                            <div class="ficha-attr-modifier-small" style="color:${modColor}; font-size: 16px; font-weight: bold; min-width: 30px; text-align: right;">${totalMod >= 0 ? '+' : ''}${totalMod}</div>
                         </div>
                     </div>
                 `;
@@ -4177,31 +4214,51 @@
         }
 
         // ===== FOTO =====
-        function uploadPhoto(e) {
+        async function uploadPhoto(e) {
             const file = e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                allCharacters[currentCharacterIndex].photo = ev.target.result;
-                document.getElementById('photoImg').src = ev.target.result;
-                document.getElementById('photoImg').style.display = 'block';
-                document.getElementById('photoPlaceholder').style.display = 'none';
-                saveAll();
-            };
-            reader.readAsDataURL(file);
+            const rawData = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = ev => resolve(ev.target.result);
+                reader.readAsDataURL(file);
+            });
+            const compressedData = await compressImage(rawData, 400, 400, 0.6);
+            allCharacters[currentCharacterIndex].photo = compressedData;
+            document.getElementById('photoImg').src = compressedData;
+            document.getElementById('photoImg').style.display = 'block';
+            document.getElementById('photoPlaceholder').style.display = 'none';
+            saveAll();
         }
 
         // ===== PERSISTÊNCIA =====
         function saveAll() { localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); }
 
-        function manualSave() {
+        async function manualSave() {
             try {
+                // Feedback visual imediato
+                const saveBtn = document.getElementById('save-btn');
+                const originalText = saveBtn.innerText;
+                saveBtn.innerText = "SAVING...";
+
+                // Otimização: Comprimir fotos de todos os personagens que ainda não foram comprimidas
+                // Isso ajuda a liberar espaço se o usuário importou muitos personagens sem compressão
+                for (let char of allCharacters) {
+                    if (char.photo && char.photo.length > 50000) { // Se a foto for maior que ~50KB
+                        char.photo = await compressImage(char.photo, 400, 400, 0.6);
+                    }
+                    if (char.items) {
+                        for (let item of char.items) {
+                            if (item.photo && item.photo.length > 20000) {
+                                item.photo = await compressImage(item.photo, 200, 200, 0.5);
+                            }
+                        }
+                    }
+                }
+
                 // Limpa explicitamente antes de salvar para evitar problemas de fragmentação ou erro de cota
                 localStorage.removeItem('dnd_manager_all');
                 localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
                 
-                const saveBtn = document.getElementById('save-btn');
-                const originalText = saveBtn.innerText;
                 const originalColor = saveBtn.style.borderColor;
                 
                 saveBtn.innerText = "SAVED!";
@@ -4248,24 +4305,36 @@
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = ev => {
+            reader.onload = async ev => {
                 try {
                     const data = JSON.parse(ev.target.result);
+                    let importedChars = Array.isArray(data) ? data : [data];
+                    
+                    if (Array.isArray(data) && !confirm("Isso substituirá seus personagens atuais. Continuar?")) return;
+                    
                     if (Array.isArray(data)) {
-                        if (confirm("Isso substituirá seus personagens atuais. Continuar?")) {
-                            // Migrar todos os personagens importados (compatibilidade com versões antigas)
-                            allCharacters = data.map(migrateCharacter);
-                            saveAll(); renderCharacterGrid();
-                        }
+                        allCharacters = importedChars.map(migrateCharacter);
                     } else {
-                        // Importar personagem único (migrar também)
                         allCharacters.push(migrateCharacter(data));
-                        saveAll(); renderCharacterGrid();
                     }
-                } catch (err) { alert("Erro ao importar o arquivo! Verifique se o arquivo é um JSON válido."); }
+
+                    // Otimizar fotos importadas para economizar espaço
+                    for (let char of allCharacters) {
+                        if (char.photo && char.photo.length > 50000) {
+                            char.photo = await compressImage(char.photo, 400, 400, 0.6);
+                        }
+                    }
+                    
+                    saveAll(); 
+                    renderCharacterGrid();
+                    alert("Importação concluída e otimizada!");
+                } catch (err) { 
+                    console.error(err);
+                    alert("Erro ao importar o arquivo! Verifique se o arquivo é um JSON válido."); 
+                }
             };
             reader.readAsText(file);
-            e.target.value = ''; // Reset para permitir re-importação do mesmo arquivo
+            e.target.value = ''; 
         }
 
         // ===== V9 MELHORIAS: CAMADAS, DUPLICAÇÃO E ROTAÇÃO =====
