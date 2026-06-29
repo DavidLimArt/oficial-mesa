@@ -3709,9 +3709,12 @@
             container.innerHTML = '';
             Object.entries(char.attributes).forEach(([key, attr]) => {
                 const baseMod = Math.floor((attr.value - 10) / 2);
-                const profBonus = attr.proficiency ? (char.proficiencyBonus || 0) : 0;
+                const modColor = baseMod >= 0 ? '#10b981' : '#ef4444';
+                const profBonus = char.proficiencyBonus || 0;
                 const totalMod = baseMod + profBonus;
-                const modColor = totalMod >= 0 ? '#10b981' : '#ef4444';
+                
+                // Texto visual de bônus (ex: =8) em amarelo se a bolinha estiver ativa
+                const visualBonus = attr.proficiency ? `<span style="color: #ffd700; font-size: 14px; margin-left: 4px;">=${totalMod}</span>` : '';
                 
                 container.innerHTML += `
                     <div class="ficha-attr-card-new">
@@ -3721,8 +3724,10 @@
                                  onclick="toggleAttrProficiency('${key}')" 
                                  style="width: 16px; height: 16px; min-width: 16px; border: 2px solid var(--accent-color); cursor: pointer;"></div>
                             <input type="number" value="${attr.value}" onchange="updateAttr('${key}', this.value)"
-                                class="ficha-attr-value-input-large" style="width: 45px; flex: none; font-size: 20px;">
-                            <div class="ficha-attr-modifier-small" style="color:${modColor}; font-size: 16px; font-weight: bold; min-width: 30px; text-align: right;">${totalMod >= 0 ? '+' : ''}${totalMod}</div>
+                                class="ficha-attr-value-input-large" style="width: 40px; flex: none; font-size: 20px;">
+                            <div class="ficha-attr-modifier-small" style="color:${modColor}; font-size: 16px; font-weight: bold; min-width: 30px; text-align: right; display: flex; align-items: center;">
+                                ${baseMod >= 0 ? '+' : ''}${baseMod}${visualBonus}
+                            </div>
                         </div>
                     </div>
                 `;
@@ -3768,17 +3773,13 @@
                 if (match && attrMap[match[1]]) {
                     const attrKey = attrMap[match[1]];
                     const attrValue = char.attributes[attrKey].value;
-                    // Modificador base do atributo
-                    const baseAttrMod = Math.floor((attrValue - 10) / 2);
-                    // Proficiência do próprio atributo (se a bolinha do atributo estiver marcada)
-                    const attrProfBonus = char.attributes[attrKey].proficiency ? (char.proficiencyBonus || 0) : 0;
-                    // Modificador total do atributo
-                    const totalAttrMod = baseAttrMod + attrProfBonus;
+                    // Modificador base do atributo (sempre o base, ignorando a bolinha visual do atributo)
+                    const attrMod = Math.floor((attrValue - 10) / 2);
                     
                     // Proficiência da perícia específica
                     const skillProfBonus = s.proficiency ? (char.proficiencyBonus || 0) : 0;
                     
-                    autoMod = totalAttrMod + skillProfBonus;
+                    autoMod = attrMod + skillProfBonus;
                     
                     // Atualiza o valor no objeto se não for uma edição manual (mantendo a lógica de "só muda se clicar")
                     // Na verdade, a regra do usuário é: ele pega diretamente, a menos que mude manualmente.
