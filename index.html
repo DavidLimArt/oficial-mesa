@@ -3018,12 +3018,12 @@
         let tempSpellSlots = [];
 
         const ATTRIBUTE_DEFAULTS = {
-            strength:     { name: 'Força',        value: 10, emoji: '💪' },
-            dexterity:    { name: 'Destreza',      value: 10, emoji: '🏃' },
-            constitution: { name: 'Constituição',  value: 10, emoji: '🛡️' },
-            intelligence: { name: 'Inteligência',  value: 10, emoji: '🧠' },
-            wisdom:       { name: 'Sabedoria',     value: 10, emoji: '🦉' },
-            charisma:     { name: 'Carisma',       value: 10, emoji: '🗣️' }
+            strength:     { name: 'Força',        value: 10, emoji: '💪', proficiency: false },
+            dexterity:    { name: 'Destreza',      value: 10, emoji: '🏃', proficiency: false },
+            constitution: { name: 'Constituição',  value: 10, emoji: '🛡️', proficiency: false },
+            intelligence: { name: 'Inteligência',  value: 10, emoji: '🧠', proficiency: false },
+            wisdom:       { name: 'Sabedoria',     value: 10, emoji: '🦉', proficiency: false },
+            charisma:     { name: 'Carisma',       value: 10, emoji: '🗣️', proficiency: false }
         };
 
         const SKILL_DEFAULTS = [
@@ -3671,19 +3671,33 @@
             const container = document.getElementById('attributesContainer');
             container.innerHTML = '';
             Object.entries(char.attributes).forEach(([key, attr]) => {
-                const mod = Math.floor((attr.value - 10) / 2);
-                const modColor = mod >= 0 ? '#10b981' : '#ef4444';
+                const baseMod = Math.floor((attr.value - 10) / 2);
+                const profBonus = attr.proficiency ? (char.proficiencyBonus || 0) : 0;
+                const totalMod = baseMod + profBonus;
+                const modColor = totalMod >= 0 ? '#10b981' : '#ef4444';
+                
                 container.innerHTML += `
                     <div class="ficha-attr-card-new">
                         <div class="ficha-attr-name-top">${attr.emoji} ${attr.name}</div>
                         <div class="ficha-attr-row">
+                            <div class="ficha-skill-dot ${attr.proficiency ? 'ficha-skill-dot-active' : ''}" 
+                                 onclick="toggleAttrProficiency('${key}')" 
+                                 style="margin-right: -5px; width: 14px; height: 14px; min-width: 14px; border-width: 1px;"></div>
                             <input type="number" value="${attr.value}" onchange="updateAttr('${key}', this.value)"
-                                class="ficha-attr-value-input-large">
-                            <div class="ficha-attr-modifier-small" style="color:${modColor}">${mod >= 0 ? '+' : ''}${mod}</div>
+                                class="ficha-attr-value-input-large" style="max-width: 60px;">
+                            <div class="ficha-attr-modifier-small" style="color:${modColor}">${totalMod >= 0 ? '+' : ''}${totalMod}</div>
                         </div>
                     </div>
                 `;
             });
+        }
+
+        function toggleAttrProficiency(key) {
+            const char = allCharacters[currentCharacterIndex];
+            char.attributes[key].proficiency = !char.attributes[key].proficiency;
+            renderAttributes();
+            renderSkills();
+            saveAll();
         }
 
         function updateAttr(key, val) {
@@ -3717,9 +3731,17 @@
                 if (match && attrMap[match[1]]) {
                     const attrKey = attrMap[match[1]];
                     const attrValue = char.attributes[attrKey].value;
-                    const attrMod = Math.floor((attrValue - 10) / 2);
-                    const profBonus = s.proficiency ? (char.proficiencyBonus || 0) : 0;
-                    autoMod = attrMod + profBonus;
+                    // Modificador base do atributo
+                    const baseAttrMod = Math.floor((attrValue - 10) / 2);
+                    // Proficiência do próprio atributo (se a bolinha do atributo estiver marcada)
+                    const attrProfBonus = char.attributes[attrKey].proficiency ? (char.proficiencyBonus || 0) : 0;
+                    // Modificador total do atributo
+                    const totalAttrMod = baseAttrMod + attrProfBonus;
+                    
+                    // Proficiência da perícia específica
+                    const skillProfBonus = s.proficiency ? (char.proficiencyBonus || 0) : 0;
+                    
+                    autoMod = totalAttrMod + skillProfBonus;
                     
                     // Atualiza o valor no objeto se não for uma edição manual (mantendo a lógica de "só muda se clicar")
                     // Na verdade, a regra do usuário é: ele pega diretamente, a menos que mude manualmente.
@@ -4174,7 +4196,10 @@
 
         function manualSave() {
             try {
+                // Limpa explicitamente antes de salvar para evitar problemas de fragmentação ou erro de cota
+                localStorage.removeItem('dnd_manager_all');
                 localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
+                
                 const saveBtn = document.getElementById('save-btn');
                 const originalText = saveBtn.innerText;
                 const originalColor = saveBtn.style.borderColor;
