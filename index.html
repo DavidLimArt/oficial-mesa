@@ -1549,7 +1549,7 @@
                     <button onclick="exportAllCharacters()">Exportar Backup</button>
                     <button onclick="document.getElementById('importFile').click()">Importar Backup</button>
                     <input type="file" id="importFile" style="display:none" onchange="importAllCharacters(event)">
-                    <button id="mute-btn" onclick="toggleMute()" style="border-color:#64748b; color:#64748b; width:40px; padding:8px 0;">🔊</button>
+                    <button id="save-btn" onclick="saveAll(true)" style="border-color:#4dff88; color:#4dff88; width:80px; padding:8px 0;">SAVE</button>
                 </div>
         </div>
 
@@ -1573,7 +1573,7 @@
             <div class="character-controls-right">
                 <button onclick="toggleMestre()" style="border-color:#bc8cf2; color:#bc8cf2;">👁️ Painel Mestre</button>
                 <button onclick="syncPlayerData()" style="border-color:#58a6ff; color:#58a6ff;">🔄 Sincronizar</button>
-                <button onclick="exportCurrentCharacter()">💾 Salvar JSON</button>
+                <button onclick="saveAll(true)" style="border-color:#4dff88; color:#4dff88; font-weight: bold;">💾 SAVE</button>
             </div>
         </div>
 
@@ -3324,7 +3324,7 @@
             loadCharacterData(char);
         }
 
-        function closeCharacter() {
+        function closeCharacter() { saveAll();
             currentCharacterIndex = -1;
             wbInitialized = false; // Resetar flag para próximo personagem
             wbLastCharIdx = -1;
@@ -4154,7 +4154,25 @@
         }
 
         // ===== PERSISTÊNCIA =====
-        function saveAll() { localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); }
+        function saveAll(showFeedback = false) { 
+            localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); 
+            if (showFeedback) {
+                const btn = document.getElementById('save-btn');
+                if (btn) {
+                    const originalText = btn.innerText;
+                    btn.innerText = 'SALVO! ✅';
+                    btn.style.borderColor = '#4dff88';
+                    setTimeout(() => { btn.innerText = originalText; }, 2000);
+                }
+                // Também dar feedback no botão de salvar do personagem se estiver aberto
+                const saveJsonBtn = document.querySelector('button[onclick="exportCurrentCharacter()"]');
+                if (saveJsonBtn) {
+                    const originalText = saveJsonBtn.innerText;
+                    saveJsonBtn.innerText = 'DADOS SALVOS! ✅';
+                    setTimeout(() => { saveJsonBtn.innerText = originalText; }, 2000);
+                }
+            }
+        }
 
         function exportCurrentCharacter() {
             const char = allCharacters[currentCharacterIndex];
