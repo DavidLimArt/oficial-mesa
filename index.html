@@ -1549,6 +1549,7 @@
                     <button onclick="exportAllCharacters()">Exportar Backup</button>
                     <button onclick="document.getElementById('importFile').click()">Importar Backup</button>
                     <input type="file" id="importFile" style="display:none" onchange="importAllCharacters(event)">
+                    <span id="sync-indicator"><span class="sync-dot"></span><span id="sync-text">Sincronizando...</span></span>
                     <button id="save-btn" onclick="manualSave()" style="border-color:#4dff88; color:#4dff88; font-weight: bold; padding: 8px 15px;">SAVE</button>
                 </div>
         </div>
@@ -3203,16 +3204,27 @@
             allCharacters = allCharacters.map(migrateCharacter);
             renderCharacterGrid();
 
-            const ids = ['charName', 'playerName', 'charClass', 'charRace', 'charLevel', 'charBackground', 'charAlignment', 'charAC', 'charSpeed', 'charProf', 'charInspiration', 'traits', 'ideals', 'bonds', 'flaws', 'features', 'equipment', 'notes'];
-            ids.forEach(id => {
-                document.getElementById(id).addEventListener('input', (e) => {
+            // Campos que disparam sync MQTT imediato (valores numéricos e nome)
+            const immediateIds = ['charName', 'playerName', 'charClass', 'charRace', 'charLevel', 'charBackground', 'charAlignment', 'charAC', 'charSpeed', 'charProf', 'charInspiration'];
+            // Campos que usam debounce de 500ms (textos longos)
+            const debouncedIds = ['traits', 'ideals', 'bonds', 'flaws', 'features', 'equipment', 'notes'];
+
+            // Mapa de debounce por campo
+            const _inputDebounceTimers = {};
+
+            const allFieldIds = [...immediateIds, ...debouncedIds];
+            allFieldIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.addEventListener('input', (e) => {
                     if (currentCharacterIndex === -1) return;
                     let val = e.target.value;
                     const prop = id === 'charName' ? 'name' : id === 'charAC' ? 'armorClass' : id === 'charProf' ? 'proficiencyBonus' : id === 'charClass' ? 'class' : id === 'charLevel' ? 'level' : id;
                     if (['charLevel', 'charAC', 'charSpeed', 'charProf', 'charInspiration'].includes(id)) val = parseInt(val) || 0;
                     allCharacters[currentCharacterIndex][prop] = val;
-                    if (id === 'charProf') renderSkills(); // Atualiza perícias se o bônus de proficiência mudar
-                    
+
+                    if (id === 'charProf') renderSkills();
+
                     // Lógica de Bônus de Proficiência Automático baseado no Nível
                     if (id === 'charLevel') {
                         const level = parseInt(val) || 1;
@@ -3221,23 +3233,36 @@
                         else if (level >= 13) profBonus = 5;
                         else if (level >= 9) profBonus = 4;
                         else if (level >= 5) profBonus = 3;
-                        
                         const profInput = document.getElementById('charProf');
                         profInput.value = profBonus;
                         allCharacters[currentCharacterIndex].proficiencyBonus = profBonus;
-                        renderSkills(); // Atualiza as perícias com o novo bônus
+                        renderSkills();
                     }
 
-                    saveAll();
+                    // Campos de texto longo: debounce de 500ms antes de salvar e sincronizar
+                    if (debouncedIds.includes(id)) {
+                        clearTimeout(_inputDebounceTimers[id]);
+                        _inputDebounceTimers[id] = setTimeout(() => {
+                            saveAll();
+                            publishDelta(currentCharacterIndex, prop, val);
+                        }, 500);
+                    } else {
+                        // Campos imediatos: salva e envia delta direto
+                        saveAll();
+                        publishDelta(currentCharacterIndex, prop, val);
+                    }
                 });
             });
 
+            let _resizeTimer = null;
             new ResizeObserver(() => {
                 if (currentCharacterIndex !== -1) {
                     const box = document.getElementById('photoBox');
                     allCharacters[currentCharacterIndex].photoWidth = box.offsetWidth;
                     allCharacters[currentCharacterIndex].photoHeight = box.offsetHeight;
-                    saveAll();
+                    // Debounce: só salva após 800ms sem resize
+                    clearTimeout(_resizeTimer);
+                    _resizeTimer = setTimeout(() => saveAll(), 800);
                 }
             }).observe(document.getElementById('photoBox'));
         };
@@ -3551,16 +3576,19 @@
             }
         }
 
-        function handleItemPhotoUpload(e) {
+        async function handleItemPhotoUpload(e) {
             const file = e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = ev => {
-                document.getElementById('item-photo-preview').src = ev.target.result;
-                document.getElementById('item-photo-preview').style.display = 'block';
-                document.getElementById('item-photo-placeholder').style.display = 'none';
-            };
-            reader.readAsDataURL(file);
+            const rawData = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = ev => resolve(ev.target.result);
+                reader.readAsDataURL(file);
+            });
+            // Comprime a imagem do item antes de exibir/salvar (max 200x200, 60% qualidade)
+            const compressed = await compressImage(rawData, 200, 200, 0.6);
+            document.getElementById('item-photo-preview').src = compressed;
+            document.getElementById('item-photo-preview').style.display = 'block';
+            document.getElementById('item-photo-placeholder').style.display = 'none';
         }
 
         // Drag and Drop
@@ -3743,10 +3771,13 @@
         }
 
         function updateAttr(key, val) {
-            allCharacters[currentCharacterIndex].attributes[key].value = parseInt(val) || 0;
+            const idx = currentCharacterIndex;
+            allCharacters[idx].attributes[key].value = parseInt(val) || 0;
             renderAttributes();
-            renderSkills(); // Atualiza perícias quando atributo muda
+            renderSkills();
             saveAll();
+            // Delta: envia o sub-campo do atributo
+            publishDelta(idx, `attributes.${key}.value`, parseInt(val) || 0);
         }
 
         // ===== PERÍCIAS =====
@@ -3991,6 +4022,11 @@
                 tempDisp.style.display = 'none';
             }
             saveAll();
+            // Delta de HP: envia apenas os campos alterados
+            if (currentCharacterIndex !== -1) {
+                publishDelta(currentCharacterIndex, 'hp', char.hitPoints, true);
+                publishDelta(currentCharacterIndex, 'tempHP', char.tempHP, true);
+            }
         }
 
         function modifyHP(v) {
@@ -4038,6 +4074,8 @@
             if (!isNaN(max) && max > 0) char.maxHitPoints = max;
             document.getElementById('hp-edit-panel').style.display = 'none';
             updateHPDisplay();
+            // Envia delta de HP máximo também
+            publishDelta(currentCharacterIndex, 'hpMax', char.maxHitPoints, true);
         }
 
         // ===== TESTES DE MORTE =====
@@ -4232,51 +4270,127 @@
         }
 
         // ===== PERSISTÊNCIA =====
-        function saveAll() { localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters)); }
+
+        // ---- Controle do indicador de sincronização ----
+        let _syncHideTimer = null;
+        function setSyncStatus(state) {
+            // state: 'syncing' | 'synced' | 'error' | 'hidden'
+            const el = document.getElementById('sync-indicator');
+            const txt = document.getElementById('sync-text');
+            if (!el || !txt) return;
+            clearTimeout(_syncHideTimer);
+            el.className = '';
+            if (state === 'hidden') { el.style.opacity = '0'; return; }
+            const labels = { syncing: 'Sincronizando...', synced: 'Sincronizado', error: 'Erro de conexão' };
+            txt.textContent = labels[state] || state;
+            el.classList.add(state);
+            if (state === 'synced') {
+                _syncHideTimer = setTimeout(() => {
+                    el.classList.remove('synced');
+                    el.style.opacity = '0';
+                }, 2500);
+            }
+        }
+
+        // ---- Debounce para localStorage (evita escritas a cada tecla) ----
+        let _saveTimer = null;
+        function saveAll() {
+            clearTimeout(_saveTimer);
+            _saveTimer = setTimeout(() => {
+                try {
+                    // Remove antes de gravar para evitar fragmentação
+                    localStorage.removeItem('dnd_manager_all');
+                    localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
+                } catch(e) {
+                    console.warn('[saveAll] localStorage cheio, tentando liberar espaço...', e);
+                    _cleanupLocalStorage();
+                    try {
+                        localStorage.removeItem('dnd_manager_all');
+                        localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
+                    } catch(e2) {
+                        console.error('[saveAll] Falha crítica ao salvar:', e2);
+                    }
+                }
+            }, 300);
+        }
+
+        // ---- Limpeza de resíduos antigos do localStorage ----
+        function _cleanupLocalStorage() {
+            const knownKeys = ['dnd_manager_all', 'dnd_mesa_codigo', 'mestreMonsters', 'mestreOrder', 'visibleMonsters'];
+            const toRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('dnd_') && !knownKeys.includes(k)) toRemove.push(k);
+            }
+            toRemove.forEach(k => localStorage.removeItem(k));
+            console.log('[cleanup] Removidas', toRemove.length, 'chaves obsoletas do localStorage.');
+        }
 
         async function manualSave() {
+            const saveBtn = document.getElementById('save-btn');
+            const originalText = saveBtn.innerText;
             try {
-                // Feedback visual imediato
-                const saveBtn = document.getElementById('save-btn');
-                const originalText = saveBtn.innerText;
-                saveBtn.innerText = "SAVING...";
+                saveBtn.innerText = 'SAVING...';
+                setSyncStatus('syncing');
 
-                // Otimização: Comprimir fotos de todos os personagens que ainda não foram comprimidas
-                // Isso ajuda a liberar espaço se o usuário importou muitos personagens sem compressão
+                // --- Compressão profunda: personagem, itens e imagens de magia ---
                 for (let char of allCharacters) {
-                    if (char.photo && char.photo.length > 50000) { // Se a foto for maior que ~50KB
+                    // Foto principal
+                    if (char.photo && char.photo.startsWith('data:image') && char.photo.length > 50000) {
                         char.photo = await compressImage(char.photo, 400, 400, 0.6);
                     }
-                    if (char.items) {
+                    // Fotos de itens do inventário
+                    if (Array.isArray(char.items)) {
                         for (let item of char.items) {
-                            if (item.photo && item.photo.length > 20000) {
+                            if (item.photo && item.photo.startsWith('data:image') && item.photo.length > 20000) {
                                 item.photo = await compressImage(item.photo, 200, 200, 0.5);
+                            }
+                        }
+                    }
+                    // Imagens do grimório
+                    if (char.grimorio && Array.isArray(char.grimorio.sections)) {
+                        for (let sec of char.grimorio.sections) {
+                            if (!Array.isArray(sec.columns)) continue;
+                            for (let col of sec.columns) {
+                                if (!Array.isArray(col.spells)) continue;
+                                for (let spell of col.spells) {
+                                    if (spell.img && spell.img.startsWith('data:image') && spell.img.length > 30000) {
+                                        spell.img = await compressImage(spell.img, 300, 300, 0.6);
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                // Limpa explicitamente antes de salvar para evitar problemas de fragmentação ou erro de cota
+                // --- Limpeza de resíduos antes de gravar ---
+                _cleanupLocalStorage();
                 localStorage.removeItem('dnd_manager_all');
                 localStorage.setItem('dnd_manager_all', JSON.stringify(allCharacters));
-                
-                const originalColor = saveBtn.style.borderColor;
-                
-                saveBtn.innerText = "SAVED!";
-                saveBtn.style.borderColor = "#4dff88";
-                saveBtn.style.backgroundColor = "rgba(77, 255, 136, 0.2)";
-                
+
+                saveBtn.innerText = 'SAVED!';
+                saveBtn.style.borderColor = '#4dff88';
+                saveBtn.style.backgroundColor = 'rgba(77, 255, 136, 0.2)';
+                setSyncStatus('synced');
                 playSFX('success');
-                
+
                 setTimeout(() => {
                     saveBtn.innerText = originalText;
-                    saveBtn.style.backgroundColor = "transparent";
+                    saveBtn.style.backgroundColor = 'transparent';
                 }, 2000);
-                
-                console.log("Personagens salvos com sucesso no LocalStorage.");
+
+                console.log('[manualSave] Personagens salvos com sucesso.');
             } catch (e) {
-                console.error("Erro ao salvar no LocalStorage:", e);
-                alert("Erro ao salvar! O LocalStorage pode estar cheio.");
+                console.error('[manualSave] Erro ao salvar:', e);
+                saveBtn.innerText = originalText;
+                setSyncStatus('error');
+                // Tentar liberação de emergência
+                if (e.name === 'QuotaExceededError') {
+                    _cleanupLocalStorage();
+                    alert('Aviso: Armazenamento quase cheio! Use "Exportar Backup" para fazer um backup e libere espaço removendo personagens desnecessários.');
+                } else {
+                    alert('Erro ao salvar! Verifique o console para detalhes.');
+                }
             }
         }
 
@@ -4760,25 +4874,96 @@
             '#ec4899', '#f97316', '#a855f7', '#3b82f6', '#334155'
         ];
 
+        // ===== SISTEMA DE DELTA UPDATES =====
+        // Envia apenas o campo alterado, não o objeto inteiro
+        let _deltaTimers = {};
+        function publishDelta(charIdx, field, value, immediate = false) {
+            if (!mqttClient || !mqttClient.connected) return;
+            if (!selectedCharIndices.has(charIdx)) return;
+
+            const char = allCharacters[charIdx];
+            if (!char) return;
+            const safeId = btoa(unescape(encodeURIComponent(char.name))).replace(/[/+=]/g, '');
+
+            const doPublish = () => {
+                setSyncStatus('syncing');
+                const delta = { _delta: true, id: safeId, field, value, ts: Date.now() };
+                mqttClient.publish(
+                    `dnd/mesa/${mesaCodigo}/${safeId}/delta`,
+                    JSON.stringify(delta),
+                    { qos: 0 }
+                );
+                setSyncStatus('synced');
+            };
+
+            if (immediate) {
+                doPublish();
+            } else {
+                const key = safeId + ':' + field;
+                clearTimeout(_deltaTimers[key]);
+                _deltaTimers[key] = setTimeout(doPublish, 80);
+            }
+        }
+
+        // Publica o snapshot completo (sem foto) para novos entrantes
+        function publishFullSnapshot(charIdx) {
+            if (!mqttClient || !mqttClient.connected) return;
+            const char = allCharacters[charIdx];
+            if (!char) return;
+            const safeId = btoa(unescape(encodeURIComponent(char.name))).replace(/[/+=]/g, '');
+            const existing = jogadoresOnline[safeId] || {};
+
+            setSyncStatus('syncing');
+            const data = {
+                name: char.name || 'Sem Nome',
+                hp: char.hitPoints || 0,
+                hpMax: char.maxHitPoints || 0,
+                tempHP: char.tempHP || 0,
+                ac: char.armorClass || 0,
+                class: char.class || '',
+                level: char.level || 1,
+                // Foto: envia apenas se for URL externa (não Base64) para evitar sobrecarga
+                photo: (char.photo && !char.photo.startsWith('data:image')) ? char.photo : '',
+                items: (char.items || []).map(item => ({
+                    id: item.id,
+                    name: item.name,
+                    description: item.description,
+                    // Foto de item: nunca envia Base64 via MQTT
+                    photo: (item.photo && !item.photo.startsWith('data:image')) ? item.photo : '',
+                    color: item.color || '',
+                    isMasterItem: item.isMasterItem || false
+                })),
+                lastUpdate: Date.now(),
+                hidden: existing.hidden || false,
+                condition: existing.condition || 'Nenhuma',
+                conditionColor: existing.conditionColor || ''
+            };
+            mqttClient.publish(`dnd/mesa/${mesaCodigo}/${safeId}`, JSON.stringify(data), { retain: true, qos: 0 });
+            mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/${safeId}/cmd`);
+            mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/${safeId}/delta`);
+            setSyncStatus('synced');
+        }
+
         function initOnline() {
             if (mqttClient && mqttClient.connected) {
                 // Desconectar
-                mqttClient.end();
+                mqttClient.end(true);
                 mqttClient = null;
                 selectedCharIndices.clear();
                 isSelectingForMesa = false;
-                resetMestrePanel(); // Limpa a lista de jogadores ao desconectar
+                resetMestrePanel();
                 updateOnlineButtonState();
                 renderCharacterGrid();
+                setSyncStatus('hidden');
                 return;
             }
 
-            const codigo = prompt("Digite o Código da Mesa (ex: mesa123):", mesaCodigo);
+            const codigo = prompt('Digite o Código da Mesa (ex: mesa123):', mesaCodigo);
             if (!codigo) return;
-            
+
             mesaCodigo = codigo;
             localStorage.setItem('dnd_mesa_codigo', codigo);
-            
+
             // Iniciar modo de seleção
             isSelectingForMesa = true;
             selectedCharIndices.clear();
@@ -4790,7 +4975,7 @@
 
         function confirmSelection() {
             if (selectedCharIndices.size === 0) {
-                if (!confirm("Nenhum personagem selecionado. Deseja cancelar a conexão?")) return;
+                if (!confirm('Nenhum personagem selecionado. Deseja cancelar a conexão?')) return;
                 isSelectingForMesa = false;
                 document.getElementById('confirm-selection-btn').style.display = 'none';
                 document.getElementById('online-btn').style.display = 'inline-block';
@@ -4798,57 +4983,91 @@
                 return;
             }
 
-            // Resetar o painel antes de conectar a uma nova mesa
             resetMestrePanel();
 
-            // Conectar ao MQTT
             const statusDot = document.getElementById('status-dot');
             if (statusDot) statusDot.style.background = '#ffd700';
+            setSyncStatus('syncing');
 
+            const clientId = 'dnd_user_' + Math.random().toString(16).substr(2, 8);
             mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
                 keepalive: 60,
-                reconnectPeriod: 1000,
+                // Reconexão automática silenciosa: tenta a cada 3s, sem alertar o usuário
+                reconnectPeriod: 3000,
                 connectTimeout: 30 * 1000,
-                clientId: 'dnd_user_' + Math.random().toString(16).substr(2, 8)
+                clientId
             });
-            
+
+            let _isFirstConnect = true;
+            let _reconnectCount = 0;
+
             mqttClient.on('connect', () => {
+                _reconnectCount = 0;
                 const statusDot = document.getElementById('status-dot');
                 if (statusDot) statusDot.style.background = '#4dff88';
+
+                // Subscrições globais da mesa
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/+`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_heartbeat`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_order`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_visible_monsters`);
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/_mestre_monsters`);
-                
-                // Sincroniza todos os selecionados
-                selectedCharIndices.forEach(idx => syncPlayerData(idx));
-                
-                // Se for o mestre, sincronizar ordem e visibilidade de monstros
+
+                // Snapshot completo ao conectar (sem Base64)
+                selectedCharIndices.forEach(idx => publishFullSnapshot(idx));
+
                 if (iamTheMestre) {
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_order`, JSON.stringify(mestreOrder), { retain: true });
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_visible_monsters`, JSON.stringify(visibleMonsters), { retain: true });
                     mqttClient.publish(`dnd/mesa/${mesaCodigo}/_mestre_monsters`, JSON.stringify(mestreMonsters), { retain: true });
                 }
-                
-                isSelectingForMesa = false;
-                document.getElementById('confirm-selection-btn').style.display = 'none';
-                document.getElementById('online-btn').style.display = 'inline-block';
-                updateOnlineButtonState();
-                renderCharacterGrid();
-                console.log('Conectado à mesa:', mesaCodigo);
+
+                if (_isFirstConnect) {
+                    _isFirstConnect = false;
+                    isSelectingForMesa = false;
+                    document.getElementById('confirm-selection-btn').style.display = 'none';
+                    document.getElementById('online-btn').style.display = 'inline-block';
+                    updateOnlineButtonState();
+                    renderCharacterGrid();
+                } else {
+                    // Reconexão silenciosa: apenas loga e atualiza o dot
+                    console.log('[MQTT] Reconectado à mesa:', mesaCodigo);
+                }
+                setSyncStatus('synced');
+                console.log('[MQTT] Conectado à mesa:', mesaCodigo);
             });
 
-            mqttClient.on('error', (err) => {
+            // Reconexão silenciosa: sem alert, apenas atualiza o indicador
+            mqttClient.on('reconnect', () => {
+                _reconnectCount++;
+                const statusDot = document.getElementById('status-dot');
+                if (statusDot) statusDot.style.background = '#ffd700';
+                setSyncStatus('syncing');
+                console.log(`[MQTT] Tentativa de reconexão #${_reconnectCount}...`);
+            });
+
+            mqttClient.on('offline', () => {
                 const statusDot = document.getElementById('status-dot');
                 if (statusDot) statusDot.style.background = '#ff4d4d';
-                console.error('Erro na conexão:', err);
-                alert("Erro ao conectar à mesa. Tente novamente.");
-                isSelectingForMesa = false;
-                document.getElementById('confirm-selection-btn').style.display = 'none';
-                document.getElementById('online-btn').style.display = 'inline-block';
-                renderCharacterGrid();
+                setSyncStatus('error');
+                console.warn('[MQTT] Conexão perdida. Reconectando automaticamente...');
+            });
+
+            // Erro fatal (sem reconexão possível)
+            mqttClient.on('error', (err) => {
+                console.error('[MQTT] Erro:', err);
+                // Só alerta se for a primeira tentativa de conexão
+                if (_isFirstConnect) {
+                    const statusDot = document.getElementById('status-dot');
+                    if (statusDot) statusDot.style.background = '#ff4d4d';
+                    setSyncStatus('error');
+                    alert('Erro ao conectar à mesa. Verifique sua internet e tente novamente.');
+                    isSelectingForMesa = false;
+                    document.getElementById('confirm-selection-btn').style.display = 'none';
+                    document.getElementById('online-btn').style.display = 'inline-block';
+                    renderCharacterGrid();
+                }
             });
 
             mqttClient.on('message', (topic, message) => {
@@ -4856,10 +5075,10 @@
                     const data = JSON.parse(message.toString());
                     const parts = topic.split('/');
                     const lastPart = parts.pop();
-                    
+
                     if (lastPart === '_mestre') {
                         mestreId = data.id;
-                        if (mestreId !== mqttClient.options.clientId) iamTheMestre = false;
+                        if (mestreId !== clientId) iamTheMestre = false;
                         if (mestreId) lastMestreHeartbeat = Date.now();
                         renderMestrePanel();
                     } else if (lastPart === '_mestre_order') {
@@ -4870,37 +5089,56 @@
                         renderMestrePanel();
                     } else if (lastPart === '_mestre_monsters') {
                         mestreMonsters = data;
-                        if (!iamTheMestre) {
-                            localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
-                        }
+                        if (!iamTheMestre) localStorage.setItem('mestreMonsters', JSON.stringify(mestreMonsters));
                         renderMestrePanel();
                         if (document.getElementById('mestre-bestiary-view').style.display === 'block') renderBestiary();
                     } else if (lastPart === '_mestre_heartbeat') {
-                        if (data.id === mestreId) {
-                            lastMestreHeartbeat = Date.now();
-                        }
+                        if (data.id === mestreId) lastMestreHeartbeat = Date.now();
                     } else if (lastPart === 'cmd') {
-                        // Receber comando do mestre
                         const playerId = parts.pop();
                         handleRemoteCommand(playerId, data);
-                    } else if (lastPart === 'rolls') {
-                        // Se for uma rolagem de mestre e eu NÃO sou o mestre, só mostro se for pública
-                        if (data.isMestre) {
-                            if (!iamTheMestre) {
-                                showDiceAnimation("Mestre", data.rollName, data.rollCalc, data.result, data.natural, true);
+                    } else if (lastPart === 'delta') {
+                        // ===== RECEBIMENTO DE DELTA =====
+                        // Atualiza apenas o campo específico no objeto local
+                        const playerId = parts.pop();
+                        const localIdx = allCharacters.findIndex(c => {
+                            const id = btoa(unescape(encodeURIComponent(c.name))).replace(/[/+=]/g, '');
+                            return id === playerId;
+                        });
+                        if (localIdx !== -1 && data.field && data.value !== undefined) {
+                            // Não sobrescreve se a mensagem for mais antiga que o estado local
+                            const char = allCharacters[localIdx];
+                            if (!char._lastDeltaTs) char._lastDeltaTs = {};
+                            const prevTs = char._lastDeltaTs[data.field] || 0;
+                            if (data.ts > prevTs) {
+                                char[data.field] = data.value;
+                                char._lastDeltaTs[data.field] = data.ts;
+                                saveAll();
+                                // Atualiza a UI se este personagem estiver aberto
+                                if (currentCharacterIndex === localIdx) {
+                                    const el = document.getElementById(data.field);
+                                    if (el && el !== document.activeElement) el.value = data.value;
+                                    if (['hitPoints', 'maxHitPoints', 'tempHP'].includes(data.field)) updateHPDisplay();
+                                }
+                                if (isMestre) renderMestrePanel();
                             }
+                        }
+                    } else if (lastPart === 'rolls') {
+                        if (data.isMestre) {
+                            if (!iamTheMestre) showDiceAnimation('Mestre', data.rollName, data.rollCalc, data.result, data.natural, true);
                         } else {
                             showDiceAnimation(data.charName, data.rollName, data.rollCalc, data.result, data.natural);
                         }
                         if (data.natural === 20) playSFX('success');
                         else if (data.natural === 1) playSFX('damage');
                     } else {
+                        // Snapshot completo de outro jogador
                         const playerId = lastPart;
                         data.id = playerId;
                         jogadoresOnline[playerId] = data;
                         if (isMestre) renderMestrePanel();
                     }
-                } catch(e) { console.error("Erro ao ler mensagem:", e); }
+                } catch(e) { console.error('[MQTT] Erro ao processar mensagem:', e); }
             });
         }
 
@@ -4917,13 +5155,12 @@
             }
         }
 
-        // Debounce para evitar sobrecarga no MQTT em atualizações rápidas
+        // syncPlayerData: agora publica snapshot completo (sem Base64) via publishFullSnapshot
+        // Mantido para compatibilidade com chamadas externas (ex: botão Sincronizar)
         let syncTimeout = null;
         function syncPlayerData(forcedIndex = null) {
             if (!mqttClient || !mqttClient.connected) return;
-            
-            if (syncTimeout) clearTimeout(syncTimeout);
-            
+            clearTimeout(syncTimeout);
             syncTimeout = setTimeout(() => {
                 let indicesToSync = [];
                 if (forcedIndex !== null) {
@@ -4933,35 +5170,9 @@
                 } else if (currentCharacterIndex === -1) {
                     indicesToSync = Array.from(selectedCharIndices);
                 }
-
-                indicesToSync.forEach(idx => {
-                    const char = allCharacters[idx];
-                    if (!char) return;
-                    
-                    const safeId = btoa(unescape(encodeURIComponent(char.name))).replace(/[/+=]/g, '');
-                    const existing = jogadoresOnline[safeId] || {};
-
-                    const data = {
-                        name: char.name || "Sem Nome",
-                        hp: char.hitPoints || 0,
-                        hpMax: char.maxHitPoints || 0,
-                        tempHP: char.tempHP || 0,
-                        ac: char.armorClass || 0,
-                        class: char.class || "",
-                        level: char.level || 1,
-                        photo: char.photo || "",
-                        items: char.items || [],
-                        lastUpdate: Date.now(),
-                        hidden: existing.hidden || false,
-                        condition: existing.condition || 'Nenhuma',
-                        conditionColor: existing.conditionColor || ''
-                    };
-                    // QoS 0 para maior velocidade (quase instantâneo)
-                    mqttClient.publish(`dnd/mesa/${mesaCodigo}/${safeId}`, JSON.stringify(data), { retain: true, qos: 0 });
-                    mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/${safeId}/cmd`);
-                });
+                indicesToSync.forEach(idx => publishFullSnapshot(idx));
                 mqttClient.subscribe(`dnd/mesa/${mesaCodigo}/rolls`);
-            }, 100); // Delay de 100ms para agrupar mudanças rápidas
+            }, 100);
         }
 
         function handleRemoteCommand(safeId, cmd) {
@@ -5491,23 +5702,32 @@
             document.getElementById('master-item-modal').style.display = 'none';
         }
 
-        function handleMasterItemPhoto(e) {
+        async function handleMasterItemPhoto(e) {
             const file = e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = ev => {
-                document.getElementById('m-item-photo-preview').src = ev.target.result;
-                document.getElementById('m-item-photo-preview').style.display = 'block';
-                document.getElementById('m-item-photo-placeholder').style.display = 'none';
-            };
-            reader.readAsDataURL(file);
+            const rawData = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = ev => resolve(ev.target.result);
+                reader.readAsDataURL(file);
+            });
+            // Comprime a foto do item do mestre
+            const compressed = await compressImage(rawData, 200, 200, 0.6);
+            document.getElementById('m-item-photo-preview').src = compressed;
+            document.getElementById('m-item-photo-preview').style.display = 'block';
+            document.getElementById('m-item-photo-placeholder').style.display = 'none';
         }
 
         function sendMasterItem() {
             const name = document.getElementById('m-item-name').value.trim();
             const desc = document.getElementById('m-item-desc').value.trim();
             const photoImg = document.getElementById('m-item-photo-preview');
-            const photo = photoImg.style.display === 'block' ? photoImg.src : '';
+            let photo = photoImg.style.display === 'block' ? photoImg.src : '';
+            // Nunca envia Base64 via MQTT: imagens comprimidas já são menores,
+            // mas se ainda for Base64 (ex: import de backup), limpa para não sobrecarregar
+            if (photo && photo.startsWith('data:image') && photo.length > 30000) {
+                console.warn('[sendMasterItem] Foto muito grande para MQTT, omitindo.');
+                photo = ''; // Omite a foto para evitar sobrecarga no broker
+            }
             const color = document.getElementById('master-item-modal').dataset.selectedColor;
 
             if (!name) {
@@ -5588,19 +5808,32 @@
             alert(`${type === 'damage' ? 'Dano' : type === 'heal' ? 'Cura' : 'HP Temp'} de ${amount} enviado para ${p.name}!`);
         }
 
-        // Hook no saveAll original para disparar o sync
-        const originalSaveAll = saveAll;
-        saveAll = function() {
-            originalSaveAll.call(this);
-            syncPlayerData();
-        };
-
-        // Heartbeat de sincronização a cada 5 segundos para manter status online
+        // ===== HEARTBEAT LEVE =====
+        // A cada 30s envia apenas hp/hpMax/tempHP (não o objeto inteiro)
+        // Garante que o painel do mestre permaneça atualizado sem sobrecarregar o broker
         setInterval(() => {
-            if (mqttClient && mqttClient.connected) {
-                syncPlayerData();
-            }
-        }, 5000);
+            if (!mqttClient || !mqttClient.connected) return;
+            selectedCharIndices.forEach(idx => {
+                const char = allCharacters[idx];
+                if (!char) return;
+                const safeId = btoa(unescape(encodeURIComponent(char.name))).replace(/[/+=]/g, '');
+                // Heartbeat delta: apenas os campos de combate essenciais
+                const heartbeatFields = {
+                    hp: char.hitPoints || 0,
+                    hpMax: char.maxHitPoints || 0,
+                    tempHP: char.tempHP || 0,
+                    ac: char.armorClass || 0
+                };
+                Object.entries(heartbeatFields).forEach(([field, value]) => {
+                    const delta = { _delta: true, id: safeId, field, value, ts: Date.now() };
+                    mqttClient.publish(
+                        `dnd/mesa/${mesaCodigo}/${safeId}/delta`,
+                        JSON.stringify(delta),
+                        { qos: 0 }
+                    );
+                });
+            });
+        }, 30000); // A cada 30 segundos (era 5s com objeto inteiro)
 
         // Função de Reset do Painel
         function switchMestreTab(tab) {
@@ -5635,19 +5868,22 @@
             playSFX('click');
         }
 
-        function handleMonsterPhotoUpload(e) {
+        async function handleMonsterPhotoUpload(e) {
             const file = e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = ev => {
-                const prevImg = document.getElementById('monster-photo-preview');
-                const prevPlaceholder = document.getElementById('monster-photo-placeholder');
-                prevImg.src = ev.target.result;
-                prevImg.style.display = 'block';
-                prevPlaceholder.style.display = 'none';
-                document.getElementById('monster-modal').dataset.photo = ev.target.result;
-            };
-            reader.readAsDataURL(file);
+            const rawData = await new Promise(resolve => {
+                const reader = new FileReader();
+                reader.onload = ev => resolve(ev.target.result);
+                reader.readAsDataURL(file);
+            });
+            // Comprime a foto do monstro antes de armazenar
+            const compressed = await compressImage(rawData, 200, 200, 0.6);
+            const prevImg = document.getElementById('monster-photo-preview');
+            const prevPlaceholder = document.getElementById('monster-photo-placeholder');
+            prevImg.src = compressed;
+            prevImg.style.display = 'block';
+            prevPlaceholder.style.display = 'none';
+            document.getElementById('monster-modal').dataset.photo = compressed;
         }
 
         function saveMonster() {
@@ -6262,6 +6498,55 @@
         }
         #mestre-list::-webkit-scrollbar { width: 4px; }
         #mestre-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 10px; }
+
+        /* ===== INDICADOR DE SINCRONIZAÇÃO ===== */
+        #sync-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 20px;
+            border: 1px solid transparent;
+            transition: all 0.4s ease;
+            opacity: 0;
+            pointer-events: none;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        #sync-indicator.syncing {
+            opacity: 1;
+            color: #ffd700;
+            border-color: rgba(255, 215, 0, 0.3);
+            background: rgba(255, 215, 0, 0.08);
+        }
+        #sync-indicator.synced {
+            opacity: 1;
+            color: #4dff88;
+            border-color: rgba(77, 255, 136, 0.3);
+            background: rgba(77, 255, 136, 0.08);
+        }
+        #sync-indicator.error {
+            opacity: 1;
+            color: #ff4d4d;
+            border-color: rgba(255, 77, 77, 0.3);
+            background: rgba(255, 77, 77, 0.08);
+        }
+        #sync-indicator .sync-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: currentColor;
+            flex-shrink: 0;
+        }
+        #sync-indicator.syncing .sync-dot {
+            animation: syncPulse 0.8s ease-in-out infinite;
+        }
+        @keyframes syncPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.3; transform: scale(0.7); }
+        }
     </style>
 </body>
 </html>
