@@ -3211,6 +3211,7 @@
                     const prop = id === 'charName' ? 'name' : id === 'charAC' ? 'armorClass' : id === 'charProf' ? 'proficiencyBonus' : id === 'charClass' ? 'class' : id === 'charLevel' ? 'level' : id;
                     if (['charLevel', 'charAC', 'charSpeed', 'charProf', 'charInspiration'].includes(id)) val = parseInt(val) || 0;
                     allCharacters[currentCharacterIndex][prop] = val;
+                    if (id === 'charProf') renderSkills(); // Atualiza perícias se o bônus de proficiência mudar
                     saveAll();
                 });
             });
@@ -3672,6 +3673,7 @@
         function updateAttr(key, val) {
             allCharacters[currentCharacterIndex].attributes[key].value = parseInt(val) || 0;
             renderAttributes();
+            renderSkills(); // Atualiza perícias quando atributo muda
             saveAll();
         }
 
@@ -3680,7 +3682,35 @@
             const char = allCharacters[currentCharacterIndex];
             const container = document.getElementById('skillsContainer');
             container.innerHTML = '';
+            
+            // Mapeamento de abreviações para chaves de atributos
+            const attrMap = {
+                'For': 'strength',
+                'Des': 'dexterity',
+                'Con': 'constitution',
+                'Int': 'intelligence',
+                'Sab': 'wisdom',
+                'Car': 'charisma'
+            };
+
             char.skills.forEach((s, i) => {
+                // Extrair o atributo da string do nome, ex: "Acrobacia (Des)" -> "Des"
+                const match = s.name.match(/\((.*?)\)/);
+                let autoMod = s.modifier;
+                
+                if (match && attrMap[match[1]]) {
+                    const attrKey = attrMap[match[1]];
+                    const attrValue = char.attributes[attrKey].value;
+                    const attrMod = Math.floor((attrValue - 10) / 2);
+                    const profBonus = s.proficiency ? (char.proficiencyBonus || 0) : 0;
+                    autoMod = attrMod + profBonus;
+                    
+                    // Atualiza o valor no objeto se não for uma edição manual (mantendo a lógica de "só muda se clicar")
+                    // Na verdade, a regra do usuário é: ele pega diretamente, a menos que mude manualmente.
+                    // Vamos garantir que o valor exibido seja o calculado.
+                    s.modifier = autoMod;
+                }
+
                 container.innerHTML += `
                     <div class="ficha-skill-row-new">
                         <div class="ficha-skill-dot ${s.proficiency ? 'ficha-skill-dot-active' : ''}" onclick="toggleSkill(${i})"></div>
